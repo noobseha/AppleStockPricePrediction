@@ -1,6 +1,6 @@
 # Apple Stock Prediction & Sentiment Analysis Pipeline
 
-이 저장소는 애플(AAPL) 주가 데이터와 GPT로 생성된 뉴스 감성 점수(Sentiment Scores)를 분석하는 End-to-End 머신러닝 워크플로우를 제공합니다.
+이 레포지토리는 애플(AAPL) 주가 데이터와 GPT로 생성된 뉴스 감성 점수(Sentiment Scores)를 분석하는 End-to-End 머신러닝 워크플로우를 제공합니다.
 
 전통적인 기술적 지표와 자연어 기반의 감성 분석을 결합하여, 자동화된 데이터 전처리, 다중 모델 회귀 분석, 감성 기반 분류 분석, 그리고 하이퍼파라미터 튜닝을 수행해 **상위 5개의 최적 예측 모델 조합**을 찾아냅니다.
 
@@ -96,14 +96,14 @@ Train/Test 용도로 분할 및 스케일링된 총 7개의 `.csv` 파일을 로
 
 회귀 분석과 달리, 분류 모듈은 구체적 가격을 배제하고 오직 시장의 방향인 `상승(1)` 또는 `하락(0)` 여부만을 예측하는 데 특화되어 있습니다. 이 파트는 **GPT 뉴스 감성 지표**가 모델 성능을 얼마나 향상시키는지 중점적으로 테스트합니다.
 
-- **A/B 테스트 그룹:**
-  - `Version A (Base)`: 순수 기술적 지표 및 재무 데이터만 사용
-  - `Version B (+Sentiment)`: 기술적 지표에 GPT 감성 점수를 추가로 사용
-- **교차 검증 (Cross Validation):** K-Fold 검증(`StratifiedKFold`)과 하이퍼파라미터 튜닝(`GridSearchCV`)을 결합하여 과적합을 방지하면서 `DecisionTreeClassifier`의 가장 완벽한 트리를 구축합니다.
+- **A/B 테스트 및 평가 전략:**
+  - **테스트 그룹:** `Version A` (기술적 지표) vs `Version B` (기술적 지표 + 감성 점수)
+  - **시장 구간별 평가:** 전체 데이터셋으로 모델을 **단 1번만 학습**시킨 후, 산출된 예측 결과물만 전체 기간, 강세장(Bull), 약세장(Bear) 구간으로 분할하여 성능을 분석합니다.
+- **교차 검증 (Cross Validation):** K-Fold 검증(`StratifiedKFold`)과 하이퍼파라미터 튜닝(`GridSearchCV`)을 결합하되, 평가지표를 `f1_weighted`로 설정하여 클래스 불균형에 강건하고 과적합을 방지하는 완벽한 트리를 구축합니다.
 - **시각화 분석 창 3종 (팝업):**
-  1. **Performance Metrics:** 전체 기간, 강세장(Bull), 약세장(Bear) 각각에 대해 정확도(Accuracy), 정밀도(Precision), 재현율(Recall), F1-Score를 꼼꼼히 비교하는 바 차트.
+  1. **Performance Metrics:** 전체 기간, 강세장(Bull), 약세장(Bear) 각각에 대해 정확도(Accuracy), 정밀도(Precision(w)), 상승장 재현율(Recall(Up)), F1-Score(w)를 꼼꼼히 비교하는 바 차트.
   2. **Confusion Matrices:** 모델이 상승을 하락으로(또는 그 반대로) 잘못 짚어낸 횟수를 색상 짙기로 보여주는 오차 행렬 히트맵.
-  3. **ROC & P-R Curves:** 팽팽하게 당겨진 곡선 아래 면적(AUC, AP)이 넓을수록 분류 모델이 건강하게 작동함을 증명합니다.
+  3. **ROC Curves:** 팽팽하게 당겨진 곡선 아래 면적(AUC)이 넓을수록 분류 모델이 건강하게 작동함을 증명합니다.
 
 ---
 
@@ -112,10 +112,10 @@ Train/Test 용도로 분할 및 스케일링된 총 7개의 `.csv` 파일을 로
 파이프라인의 하이라이트입니다. 프로그램이 이전 단계들에서 활용했던 모든 기법과 재료들을 동적으로 교차 결합하여 수많은 파이프라인을 새롭게 구동해 봅니다.
 
 - **탐색 범위 (Search Space):**
-  - `Features`: [기본 기술적 지표 vs 감성이 포함된 풀 지표]
+  - `Features`: [모든 기술적 지표 vs 감성이 포함된 풀 지표]
   - `Scalers`: [Standard vs Robust vs 스케일링 없음]
   - `Algorithms`: [DecisionTree vs RandomForest]
-  - `Hyperparameters`: 깊이(Depth), 분할 조건, 트리 갯수 등
+  - `Hyperparameters`: 깊이(Depth), 분할 조건, 트리 갯수 등 (최적화 기준: `f1_weighted`)
 - **최종 출력 (Output):** 터미널 콘솔 화면에 **정확도(Accuracy)**를 기준으로 엄격히 랭크된 **Top 5 최고 조합**이 출력됩니다. 산출된 1등 조합의 설정값(파라미터)은 여러분의 실전 트레이딩 전략이나 후속 연구에 즉시 투입 가능한 레시피가 됩니다.
 
 ---
