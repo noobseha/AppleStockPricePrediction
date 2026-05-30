@@ -259,7 +259,7 @@ def run_integrated_analysis(data_path):
     print("=" * 60)
     
     def plot_dynamic_results(full_A, full_B, bull_A, bull_B, bear_A, bear_B):
-        labels = ['Accuracy', 'Precision', 'Recall', 'F1-Score']
+        labels = ['Accuracy', 'Precision(w)', 'Recall(Up)', 'F1(w)']
         x = np.arange(len(labels))
         width = 0.35
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
@@ -303,9 +303,9 @@ def run_integrated_analysis(data_path):
             ax.set_ylabel('True Label')
         plt.tight_layout()
 
-    def plot_roc_pr_curves(y_full, proba_full_A, proba_full_B, y_bull, proba_bull_A, proba_bull_B, y_bear, proba_bear_A, proba_bear_B):
-        fig, axes = plt.subplots(2, 3, figsize=(18, 11))
-        fig.canvas.manager.set_window_title('ROC & P-R Curves (Ver A vs Ver B)')
+    def plot_roc_curves(y_full, proba_full_A, proba_full_B, y_bull, proba_bull_A, proba_bull_B, y_bear, proba_bear_A, proba_bear_B):
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        fig.canvas.manager.set_window_title('ROC Curves (Ver A vs Ver B)')
         def draw_roc(ax, y_true, proba_A, proba_B, title):
             if len(y_true) == 0: return
             fpr_A, tpr_A, _ = roc_curve(y_true, proba_A)
@@ -322,27 +322,10 @@ def run_integrated_analysis(data_path):
             ax.set_title(title, fontsize=13, fontweight='bold')
             ax.legend(loc="lower right")
             ax.grid(alpha=0.3)
-        def draw_pr(ax, y_true, proba_A, proba_B, title):
-            if len(y_true) == 0: return
-            precision_A, recall_A, _ = precision_recall_curve(y_true, proba_A)
-            ap_A = average_precision_score(y_true, proba_A)
-            precision_B, recall_B, _ = precision_recall_curve(y_true, proba_B)
-            ap_B = average_precision_score(y_true, proba_B)
-            ax.plot(recall_A, precision_A, color='#4C72B0', lw=2, label=f'Ver A (AP = {ap_A:.3f})')
-            ax.plot(recall_B, precision_B, color='#C44E52', lw=2, label=f'Ver B (AP = {ap_B:.3f})')
-            ax.set_xlim([0.0, 1.0])
-            ax.set_ylim([0.0, 1.05])
-            ax.set_xlabel('Recall')
-            ax.set_ylabel('Precision')
-            ax.set_title(title, fontsize=13, fontweight='bold')
-            ax.legend(loc="lower left")
-            ax.grid(alpha=0.3)
-        draw_roc(axes[0, 0], y_full, proba_full_A, proba_full_B, 'ROC Curve - Full Period')
-        draw_roc(axes[0, 1], y_bull, proba_bull_A, proba_bull_B, 'ROC Curve - Bull Market')
-        draw_roc(axes[0, 2], y_bear, proba_bear_A, proba_bear_B, 'ROC Curve - Bear Market')
-        draw_pr(axes[1, 0], y_full, proba_full_A, proba_full_B, 'P-R Curve - Full Period')
-        draw_pr(axes[1, 1], y_bull, proba_bull_A, proba_bull_B, 'P-R Curve - Bull Market')
-        draw_pr(axes[1, 2], y_bear, proba_bear_A, proba_bear_B, 'P-R Curve - Bear Market')
+
+        draw_roc(axes[0], y_full, proba_full_A, proba_full_B, 'ROC Curve - Full Period')
+        draw_roc(axes[1], y_bull, proba_bull_A, proba_bull_B, 'ROC Curve - Bull Market')
+        draw_roc(axes[2], y_bear, proba_bear_A, proba_bear_B, 'ROC Curve - Bear Market')
         plt.tight_layout()
 
     def evaluate_model_cls(df_train, df_test, feature_cols, target_col='Target', n_splits=5, model_name="Model"):
@@ -362,83 +345,92 @@ def run_integrated_analysis(data_path):
             'classifier__min_samples_leaf': [2, 3, 4, 5],
             'classifier__class_weight': [None, 'balanced']
         }
-        kfold = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-        grid_search = GridSearchCV(estimator=pipeline, param_grid=param_grid, cv=kfold, scoring='accuracy', n_jobs=-1)
+        
+        min_class_count = y_train.value_counts().min()
+        actual_splits = min(n_splits, int(min_class_count))
+        if actual_splits < 2: actual_splits = 2
+        kfold = StratifiedKFold(n_splits=actual_splits, shuffle=True, random_state=42)
+        grid_search = GridSearchCV(estimator=pipeline, param_grid=param_grid, cv=kfold, scoring='f1_weighted', n_jobs=-1)
         grid_search.fit(X_train, y_train)
         
-        best_cv_acc = grid_search.best_score_
+        best_cv_score = grid_search.best_score_
         clean_params = {k.replace('classifier__', ''): v for k, v in grid_search.best_params_.items()}
         print(f"{model_name} Best Params: {clean_params}")
         
         best_model = grid_search.best_estimator_
         y_pred = best_model.predict(X_test)
-        y_pred_proba = best_model.predict_proba(X_test)[:, 1]
+        
+        class_labels = best_model.named_steps["classifier"].classes_
+        pos_index = np.where(class_labels == 1)[0][0]
+        y_pred_proba = best_model.predict_proba(X_test)[:, pos_index]
         
         test_acc = accuracy_score(y_test, y_pred)
         test_precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
-        test_recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+        test_recall = recall_score(y_test, y_pred, pos_label=1, zero_division=0)
         test_f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
-        cm = confusion_matrix(y_test, y_pred)
+        cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
         metrics_list = [test_acc, test_precision, test_recall, test_f1]
         
-        return best_cv_acc, metrics_list, cm, y_test, y_pred_proba
+        return best_cv_score, metrics_list, cm, y_test, y_pred_proba, y_pred
 
     c_train_df = train_df.copy()
     c_test_df = test_df.copy()
     
-    base_features = [
-        'Open', 'High', 'Low', 'Close', 'Volume', 'SMA_50', 'SMA_200',
-        'EMA_50', 'EMA_200', 'MA_20', 'RSI', 'MACD', 'MACD_Signal',
-        'MACD_Hist', 'ADX', 'ATR', 'BB_Upper', 'BB_Middle', 'BB_Lower',
-        'Daily_Volatility'
+    sentiment_features = [
+        "gpt_sentiment_score", "signed_sentiment_score", "gpt_relevance_to_apple",
+        "gpt_importance_score", "gpt_event_type_Legal", "gpt_event_type_Macro",
+        "gpt_event_type_Other", "gpt_event_type_Product", "gpt_event_type_Regulatory",
+        "gpt_sentiment_direction_Positive"
     ]
-    sentiment_features = [c for c in c_train_df.columns if 'gpt_' in c or 'signed_sentiment_score' in c]
+    excluded_from_features = ["Date", "Target", "Date_only"] + sentiment_features
+    base_features = [col for col in c_train_df.columns if col not in excluded_from_features]
     
-    print("\n[ Full Period Model Comparison ]")
-    cv_a, metrics_full_A, cm_full_A, y_full, proba_full_A = evaluate_model_cls(
-        c_train_df, c_test_df, base_features, model_name="[ Full Period Ver A ]"
+    def calc_metrics(y_true, y_pred):
+        acc = accuracy_score(y_true, y_pred)
+        prec = precision_score(y_true, y_pred, average='weighted', zero_division=0)
+        rec = recall_score(y_true, y_pred, pos_label=1, zero_division=0)
+        f1 = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+        cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+        return [acc, prec, rec, f1], cm
+    
+    print("\n[ Model Training ]")
+    cv_a, metrics_full_A, cm_full_A, y_full, proba_full_A, y_pred_full_A = evaluate_model_cls(
+        c_train_df, c_test_df, base_features, model_name="[ Ver A: Technical Features ]"
     )
-    cv_b, metrics_full_B, cm_full_B, _, proba_full_B = evaluate_model_cls(
-        c_train_df, c_test_df, base_features + sentiment_features, model_name="[ Full Period Ver B ]"
+    cv_b, metrics_full_B, cm_full_B, _, proba_full_B, y_pred_full_B = evaluate_model_cls(
+        c_train_df, c_test_df, base_features + sentiment_features, model_name="[ Ver B: Tech + Sentiment ]"
     )
     
-    print(f"[ Full Period A ] Train CV: {cv_a:.4f} | Test Acc: {metrics_full_A[0]:.4f} | Pre: {metrics_full_A[1]:.4f} | Rec: {metrics_full_A[2]:.4f} | F1: {metrics_full_A[3]:.4f}")
+    bull_mask = (c_test_df['Bull_Bear'] == 1).values
+    bear_mask = (c_test_df['Bull_Bear'] == 0).values
+    
+    y_bull = y_full[bull_mask]
+    metrics_bull_A, cm_bull_A = calc_metrics(y_bull, y_pred_full_A[bull_mask])
+    metrics_bull_B, cm_bull_B = calc_metrics(y_bull, y_pred_full_B[bull_mask])
+    proba_bull_A = proba_full_A[bull_mask]
+    proba_bull_B = proba_full_B[bull_mask]
+
+    y_bear = y_full[bear_mask]
+    metrics_bear_A, cm_bear_A = calc_metrics(y_bear, y_pred_full_A[bear_mask])
+    metrics_bear_B, cm_bear_B = calc_metrics(y_bear, y_pred_full_B[bear_mask])
+    proba_bear_A = proba_full_A[bear_mask]
+    proba_bear_B = proba_full_B[bear_mask]
+
+    print(f"\n[ Full Period A ] Train CV: {cv_a:.4f} | Test Acc: {metrics_full_A[0]:.4f} | Pre: {metrics_full_A[1]:.4f} | Rec: {metrics_full_A[2]:.4f} | F1: {metrics_full_A[3]:.4f}")
     print(f"[ Full Period B ] Train CV: {cv_b:.4f} | Test Acc: {metrics_full_B[0]:.4f} | Pre: {metrics_full_B[1]:.4f} | Rec: {metrics_full_B[2]:.4f} | F1: {metrics_full_B[3]:.4f}")
     
-    print("\n[ Bull/Bear Market Comparison ]")
-    train_bull, train_bear = c_train_df[c_train_df['Bull_Bear'] == 1], c_train_df[c_train_df['Bull_Bear'] == 0]
-    test_bull, test_bear = c_test_df[c_test_df['Bull_Bear'] == 1], c_test_df[c_test_df['Bull_Bear'] == 0]
-    
-    metrics_bull_A = metrics_bull_B = metrics_bear_A = metrics_bear_B = [0, 0, 0, 0]
-    dummy_cm = np.array([[0, 0], [0, 0]])
-    cm_bull_A = cm_bull_B = cm_bear_A = cm_bear_B = dummy_cm
-    y_bull = y_bear = []
-    proba_bull_A = proba_bull_B = proba_bear_A = proba_bear_B = []
+    if len(y_bull) > 0:
+        print(f"[ Bull Market A ] Test Acc: {metrics_bull_A[0]:.4f} | Pre: {metrics_bull_A[1]:.4f} | Rec: {metrics_bull_A[2]:.4f} | F1: {metrics_bull_A[3]:.4f}")
+        print(f"[ Bull Market B ] Test Acc: {metrics_bull_B[0]:.4f} | Pre: {metrics_bull_B[1]:.4f} | Rec: {metrics_bull_B[2]:.4f} | F1: {metrics_bull_B[3]:.4f}")
 
-    if len(train_bull) > 0 and len(test_bull) > 0:
-        bull_cv_a, metrics_bull_A, cm_bull_A, y_bull, proba_bull_A = evaluate_model_cls(
-            train_bull, test_bull, base_features, model_name="[ Bull Market Ver A ]"
-        )
-        bull_cv_b, metrics_bull_B, cm_bull_B, _, proba_bull_B = evaluate_model_cls(
-            train_bull, test_bull, base_features + sentiment_features, model_name="[ Bull Market Ver B ]"
-        )
-        print(f"[ Bull Market A ] Train CV: {bull_cv_a:.4f} | Test Acc: {metrics_bull_A[0]:.4f} | Pre: {metrics_bull_A[1]:.4f} | Rec: {metrics_bull_A[2]:.4f} | F1: {metrics_bull_A[3]:.4f}")
-        print(f"[ Bull Market B ] Train CV: {bull_cv_b:.4f} | Test Acc: {metrics_bull_B[0]:.4f} | Pre: {metrics_bull_B[1]:.4f} | Rec: {metrics_bull_B[2]:.4f} | F1: {metrics_bull_B[3]:.4f}")
-
-    if len(train_bear) > 0 and len(test_bear) > 0:
-        bear_cv_a, metrics_bear_A, cm_bear_A, y_bear, proba_bear_A = evaluate_model_cls(
-            train_bear, test_bear, base_features, model_name="[ Bear Market Ver A ]"
-        )
-        bear_cv_b, metrics_bear_B, cm_bear_B, _, proba_bear_B = evaluate_model_cls(
-            train_bear, test_bear, base_features + sentiment_features, model_name="[ Bear Market Ver B ]"
-        )
-        print(f"[ Bear Market A ] Train CV: {bear_cv_a:.4f} | Test Acc: {metrics_bear_A[0]:.4f} | Pre: {metrics_bear_A[1]:.4f} | Rec: {metrics_bear_A[2]:.4f} | F1: {metrics_bear_A[3]:.4f}")
-        print(f"[ Bear Market B ] Train CV: {bear_cv_b:.4f} | Test Acc: {metrics_bear_B[0]:.4f} | Pre: {metrics_bear_B[1]:.4f} | Rec: {metrics_bear_B[2]:.4f} | F1: {metrics_bear_B[3]:.4f}")
+    if len(y_bear) > 0:
+        print(f"[ Bear Market A ] Test Acc: {metrics_bear_A[0]:.4f} | Pre: {metrics_bear_A[1]:.4f} | Rec: {metrics_bear_A[2]:.4f} | F1: {metrics_bear_A[3]:.4f}")
+        print(f"[ Bear Market B ] Test Acc: {metrics_bear_B[0]:.4f} | Pre: {metrics_bear_B[1]:.4f} | Rec: {metrics_bear_B[2]:.4f} | F1: {metrics_bear_B[3]:.4f}")
 
     print(f"-> Classification models evaluation visualization generated (3 windows).")
     plot_dynamic_results(metrics_full_A, metrics_full_B, metrics_bull_A, metrics_bull_B, metrics_bear_A, metrics_bear_B)
     plot_confusion_matrices(cm_full_A, cm_full_B, cm_bull_A, cm_bull_B, cm_bear_A, cm_bear_B)
-    plot_roc_pr_curves(y_full, proba_full_A, proba_full_B, y_bull, proba_bull_A, proba_bull_B, y_bear, proba_bear_A, proba_bear_B)
+    plot_roc_curves(y_full, proba_full_A, proba_full_B, y_bull, proba_bull_A, proba_bull_B, y_bear, proba_bear_A, proba_bear_B)
     plt.show(block=False)
     plt.pause(1)
 
@@ -491,7 +483,7 @@ def run_integrated_analysis(data_path):
                     pipeline = Pipeline([('classifier', model_obj)])
                 
                 kfold = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-                grid = GridSearchCV(estimator=pipeline, param_grid=params, cv=kfold, scoring='accuracy', n_jobs=-1)
+                grid = GridSearchCV(estimator=pipeline, param_grid=params, cv=kfold, scoring='f1_weighted', n_jobs=-1)
                 grid.fit(X_tr, y_tr)
                 
                 best_mod = grid.best_estimator_
@@ -526,5 +518,5 @@ def run_integrated_analysis(data_path):
     plt.show()
 
 if __name__ == "__main__":
-    DATA_FILE = "../apple_stock_enriched_phase2_output.csv"
+    DATA_FILE = "apple_stock_enriched_phase2_output.csv"
     run_integrated_analysis(DATA_FILE)
