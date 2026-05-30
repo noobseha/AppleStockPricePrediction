@@ -96,14 +96,14 @@ The regression module attempts to predict the exact numerical 'Closing Price' fo
 
 Unlike regression, the classification module is strictly optimized to predict market direction: `Up(1)` or `Down(0)`. This phase specifically tests whether **GPT News Sentiment** improves model performance.
 
-- **A/B Testing:**
-  - `Version A (Base)`: Pure technical & financial indicators.
-  - `Version B (+Sentiment)`: Technical indicators + GPT Sentiment scores.
-- **Cross Validation:** Uses `GridSearchCV` with `StratifiedKFold` to find the absolute best hyperparameters for a `DecisionTreeClassifier` while preventing overfitting.
+- **A/B Testing & Evaluation Strategy:**
+  - **Models:** Evaluates `Version A` (Technical only) vs. `Version B` (Technical + Sentiment).
+  - **Market Segmentation:** Models are trained **once** on the full dataset. The generated predictions are then dynamically segmented to evaluate performance across Full Period, Bull Market, and Bear Market conditions.
+- **Cross Validation:** Uses `GridSearchCV` (optimized for `f1_weighted`) with `StratifiedKFold` to find the absolute best hyperparameters for a `DecisionTreeClassifier` while preventing overfitting.
 - **Diagnostic Visualizations (Pop-up):**
-  1. **Performance Metrics:** Bar charts comparing Accuracy, Precision, Recall, and F1-Score across Full, Bull, and Bear market periods.
+  1. **Performance Metrics:** Bar charts comparing Accuracy, Precision(w), Recall(Up), and F1-Score(w) across Full, Bull, and Bear market periods.
   2. **Confusion Matrices:** Heatmaps showing False Positives and False Negatives.
-  3. **ROC & P-R Curves:** Evaluates classification robustness. Larger Area Under the Curve (AUC / AP) signifies a healthier model.
+  3. **ROC Curves:** Evaluates classification robustness. Larger Area Under the Curve (AUC) signifies a healthier model.
 
 ---
 
@@ -112,12 +112,11 @@ Unlike regression, the classification module is strictly optimized to predict ma
 The grand finale. The pipeline dynamically cross-evaluates every combination of techniques used previously to find the optimal deployment strategy.
 
 - **Search Space:**
-  - `Features`: [Base (Tech Only) vs. Full (Tech + Sentiment)]
+  - `Features`: [Base (All Technical) vs. Full (Technical + Sentiment)]
   - `Scalers`: [Standard vs. Robust vs. None]
   - `Algorithms`: [DecisionTree vs. RandomForest]
-  - `Hyperparameters`: Depth, splits, estimators.
+  - `Hyperparameters`: Depth, splits, estimators. (Optimized for `f1_weighted`)
 - **Output:** The terminal will display the **Top 5 Best Combinations** strictly ranked by `Accuracy`. These top configurations provide ready-to-deploy specifications for your trading strategies or further analysis.
-
 ---
 
 *End of Document. To run the full pipeline, execute `python single_top_level_func.py` in your terminal and interact with the sequential graphical outputs.*
