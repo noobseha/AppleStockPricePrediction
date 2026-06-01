@@ -8,6 +8,7 @@ import os
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from xgboost import XGBClassifier
 from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
 from sklearn.metrics import (mean_absolute_error, mean_squared_error, r2_score,
                              accuracy_score, precision_score, recall_score, f1_score,
@@ -328,7 +329,7 @@ def run_integrated_analysis(data_path):
         draw_roc(axes[2], y_bear, proba_bear_A, proba_bear_B, 'ROC Curve - Bear Market')
         plt.tight_layout()
 
-    def evaluate_model_cls(df_train, df_test, feature_cols, target_col='Target', n_splits=5, model_name="Model"):
+    def evaluate_model_cls(df_train, df_test, feature_cols, target_col='Target', n_splits=5, classifier=None, param_grid=None):
         X_train = df_train[feature_cols]
         y_train = df_train[target_col]
         X_test = df_test[feature_cols]
@@ -336,15 +337,8 @@ def run_integrated_analysis(data_path):
         
         pipeline = Pipeline([
             ('scaler', RobustScaler()),
-            ('classifier', DecisionTreeClassifier(random_state=42))
+            ('classifier', classifier)
         ])
-        
-        param_grid = {
-            'classifier__max_depth': [3, 4, 5],
-            'classifier__min_samples_split': [5, 10, 15, 20],
-            'classifier__min_samples_leaf': [2, 3, 4, 5],
-            'classifier__class_weight': [None, 'balanced']
-        }
         
         min_class_count = y_train.value_counts().min()
         actual_splits = min(n_splits, int(min_class_count))
@@ -354,24 +348,17 @@ def run_integrated_analysis(data_path):
         grid_search.fit(X_train, y_train)
         
         best_cv_score = grid_search.best_score_
-        clean_params = {k.replace('classifier__', ''): v for k, v in grid_search.best_params_.items()}
-        print(f"{model_name} Best Params: {clean_params}")
-        
         best_model = grid_search.best_estimator_
         y_pred = best_model.predict(X_test)
         
-        class_labels = best_model.named_steps["classifier"].classes_
-        pos_index = np.where(class_labels == 1)[0][0]
-        y_pred_proba = best_model.predict_proba(X_test)[:, pos_index]
-        
-        test_acc = accuracy_score(y_test, y_pred)
-        test_precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
-        test_recall = recall_score(y_test, y_pred, pos_label=1, zero_division=0)
-        test_f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
-        cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
-        metrics_list = [test_acc, test_precision, test_recall, test_f1]
-        
-        return best_cv_score, metrics_list, cm, y_test, y_pred_proba, y_pred
+        if hasattr(best_model.named_steps["classifier"], "classes_"):
+            class_labels = best_model.named_steps["classifier"].classes_
+            pos_index = np.where(class_labels == 1)[0][0]
+            y_pred_proba = best_model.predict_proba(X_test)[:, pos_index]
+        else:
+            y_pred_proba = best_model.predict_proba(X_test)[:, 1]
+            
+        return best_cv_score, y_test, y_pred_proba, y_pred
 
     c_train_df = train_df.copy()
     c_test_df = test_df.copy()
@@ -385,131 +372,150 @@ def run_integrated_analysis(data_path):
     excluded_from_features = ["Date", "Target", "Date_only"] + sentiment_features
     base_features = [col for col in c_train_df.columns if col not in excluded_from_features]
     
-    def calc_metrics(y_true, y_pred):
+    def calc_metrics(y_true, y_pred, y_prob=None):
         acc = accuracy_score(y_true, y_pred)
         prec = precision_score(y_true, y_pred, average='weighted', zero_division=0)
         rec = recall_score(y_true, y_pred, pos_label=1, zero_division=0)
         f1 = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+        roc_val = float('nan')
+        if y_prob is not None and len(np.unique(y_true)) > 1:
+            fpr, tpr, _ = roc_curve(y_true, y_prob)
+            roc_val = auc(fpr, tpr)
         cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-        return [acc, prec, rec, f1], cm
+        return [acc, prec, rec, f1, roc_val], cm
     
+    cls_models = {
+        'Decision Tree': (DecisionTreeClassifier(random_state=42), {
+            'classifier__max_depth': [3, 4, 5],
+            'classifier__min_samples_split': [5, 10, 15, 20],
+            'classifier__min_samples_leaf': [1, 2, 3, 4, 5],
+            'classifier__class_weight': [None, 'balanced']
+        }),
+        'Random Forest': (RandomForestClassifier(random_state=42), {
+            'classifier__n_estimators': [50, 100],
+            'classifier__max_depth': [3, 5]
+        }),
+        'XGBoost': (XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42), {
+            'classifier__n_estimators': [50, 100],
+            'classifier__max_depth': [3, 5],
+            'classifier__learning_rate': [0.01, 0.1]
+        })
+    }
+
     print("\n[ Model Training ]")
-    cv_a, metrics_full_A, cm_full_A, y_full, proba_full_A, y_pred_full_A = evaluate_model_cls(
-        c_train_df, c_test_df, base_features, model_name="[ Ver A: Technical Features ]"
-    )
-    cv_b, metrics_full_B, cm_full_B, _, proba_full_B, y_pred_full_B = evaluate_model_cls(
-        c_train_df, c_test_df, base_features + sentiment_features, model_name="[ Ver B: Tech + Sentiment ]"
-    )
     
-    bull_mask = (c_test_df['Bull_Bear'] == 1).values
-    bear_mask = (c_test_df['Bull_Bear'] == 0).values
-    
-    y_bull = y_full[bull_mask]
-    metrics_bull_A, cm_bull_A = calc_metrics(y_bull, y_pred_full_A[bull_mask])
-    metrics_bull_B, cm_bull_B = calc_metrics(y_bull, y_pred_full_B[bull_mask])
-    proba_bull_A = proba_full_A[bull_mask]
-    proba_bull_B = proba_full_B[bull_mask]
+    all_results = []
+    # To keep the plotting code working, we will save Decision Tree metrics specifically
+    dt_plot_data = {}
 
-    y_bear = y_full[bear_mask]
-    metrics_bear_A, cm_bear_A = calc_metrics(y_bear, y_pred_full_A[bear_mask])
-    metrics_bear_B, cm_bear_B = calc_metrics(y_bear, y_pred_full_B[bear_mask])
-    proba_bear_A = proba_full_A[bear_mask]
-    proba_bear_B = proba_full_B[bear_mask]
+    for model_name, (clf, p_grid) in cls_models.items():
+        # Version A
+        cv_a, y_full_a, proba_full_A, y_pred_full_A = evaluate_model_cls(
+            c_train_df, c_test_df, base_features, classifier=clf, param_grid=p_grid
+        )
+        # Version B
+        cv_b, y_full_b, proba_full_B, y_pred_full_B = evaluate_model_cls(
+            c_train_df, c_test_df, base_features + sentiment_features, classifier=clf, param_grid=p_grid
+        )
+        
+        # Calculate full metrics
+        metrics_full_A, cm_full_A = calc_metrics(y_full_a, y_pred_full_A, proba_full_A)
+        metrics_full_B, cm_full_B = calc_metrics(y_full_b, y_pred_full_B, proba_full_B)
+        
+        # Bull/Bear split
+        bull_mask = (c_test_df['Bull_Bear'] == 1).values
+        bear_mask = (c_test_df['Bull_Bear'] == 0).values
+        
+        y_bull = y_full_a[bull_mask]
+        metrics_bull_A, cm_bull_A = calc_metrics(y_bull, y_pred_full_A[bull_mask], proba_full_A[bull_mask])
+        metrics_bull_B, cm_bull_B = calc_metrics(y_bull, y_pred_full_B[bull_mask], proba_full_B[bull_mask])
+        
+        y_bear = y_full_a[bear_mask]
+        metrics_bear_A, cm_bear_A = calc_metrics(y_bear, y_pred_full_A[bear_mask], proba_full_A[bear_mask])
+        metrics_bear_B, cm_bear_B = calc_metrics(y_bear, y_pred_full_B[bear_mask], proba_full_B[bear_mask])
+        
+        all_results.append((model_name, "Version A", cv_a, metrics_full_A, len(y_full_a), "Full Period"))
+        all_results.append((model_name, "Version B", cv_b, metrics_full_B, len(y_full_b), "Full Period"))
+        if len(y_bull) > 0:
+            all_results.append((model_name, "Version A", cv_a, metrics_bull_A, len(y_bull), "Bull Market"))
+            all_results.append((model_name, "Version B", cv_b, metrics_bull_B, len(y_bull), "Bull Market"))
+        if len(y_bear) > 0:
+            all_results.append((model_name, "Version A", cv_a, metrics_bear_A, len(y_bear), "Bear Market"))
+            all_results.append((model_name, "Version B", cv_b, metrics_bear_B, len(y_bear), "Bear Market"))
+            
+        if model_name == "Decision Tree":
+            dt_plot_data = {
+                'metrics_full_A': metrics_full_A, 'metrics_full_B': metrics_full_B,
+                'metrics_bull_A': metrics_bull_A, 'metrics_bull_B': metrics_bull_B,
+                'metrics_bear_A': metrics_bear_A, 'metrics_bear_B': metrics_bear_B,
+                'cm_full_A': cm_full_A, 'cm_full_B': cm_full_B,
+                'cm_bull_A': cm_bull_A, 'cm_bull_B': cm_bull_B,
+                'cm_bear_A': cm_bear_A, 'cm_bear_B': cm_bear_B,
+                'y_full': y_full_a, 'proba_full_A': proba_full_A, 'proba_full_B': proba_full_B,
+                'y_bull': y_bull, 'proba_bull_A': proba_full_A[bull_mask], 'proba_bull_B': proba_full_B[bull_mask],
+                'y_bear': y_bear, 'proba_bear_A': proba_full_A[bear_mask], 'proba_bear_B': proba_full_B[bear_mask],
+            }
 
-    print(f"\n[ Full Period A ] Train CV: {cv_a:.4f} | Test Acc: {metrics_full_A[0]:.4f} | Pre: {metrics_full_A[1]:.4f} | Rec: {metrics_full_A[2]:.4f} | F1: {metrics_full_A[3]:.4f}")
-    print(f"[ Full Period B ] Train CV: {cv_b:.4f} | Test Acc: {metrics_full_B[0]:.4f} | Pre: {metrics_full_B[1]:.4f} | Rec: {metrics_full_B[2]:.4f} | F1: {metrics_full_B[3]:.4f}")
-    
-    if len(y_bull) > 0:
-        print(f"[ Bull Market A ] Test Acc: {metrics_bull_A[0]:.4f} | Pre: {metrics_bull_A[1]:.4f} | Rec: {metrics_bull_A[2]:.4f} | F1: {metrics_bull_A[3]:.4f}")
-        print(f"[ Bull Market B ] Test Acc: {metrics_bull_B[0]:.4f} | Pre: {metrics_bull_B[1]:.4f} | Rec: {metrics_bull_B[2]:.4f} | F1: {metrics_bull_B[3]:.4f}")
+    print("\nCV Summary")
+    print("-" * 72)
+    for model_name, version, cv_score, _, _, segment in all_results:
+        if segment == "Full Period":
+            print(f"{model_name} ({version}) CV(f1_weighted): {cv_score:.4f}")
 
-    if len(y_bear) > 0:
-        print(f"[ Bear Market A ] Test Acc: {metrics_bear_A[0]:.4f} | Pre: {metrics_bear_A[1]:.4f} | Rec: {metrics_bear_A[2]:.4f} | F1: {metrics_bear_A[3]:.4f}")
-        print(f"[ Bear Market B ] Test Acc: {metrics_bear_B[0]:.4f} | Pre: {metrics_bear_B[1]:.4f} | Rec: {metrics_bear_B[2]:.4f} | F1: {metrics_bear_B[3]:.4f}")
+    print("\nTest Performance by Market Regime")
+    print("-" * 110)
+    print(f"{'Segment':<14} {'Model':<16} {'Version':<12} {'N':>5} {'Accuracy':>10} {'Precision(w)':>13} {'Recall(Up)':>11} {'F1(w)':>9} {'ROC-AUC':>10}")
+    print("-" * 110)
+    for model_name, version, _, metrics, n_samples, segment in all_results:
+        acc, pre, rec, f1, roc = metrics
+        roc_str = f"{roc:.4f}" if not np.isnan(roc) else "N/A"
+        print(f"{segment:<14} {model_name:<16} {version:<12} {n_samples:>5} {acc:>10.4f} {pre:>13.4f} {rec:>11.4f} {f1:>9.4f} {roc_str:>10}")
+    print("-" * 110)
 
     print(f"-> Classification models evaluation visualization generated (3 windows).")
-    plot_dynamic_results(metrics_full_A, metrics_full_B, metrics_bull_A, metrics_bull_B, metrics_bear_A, metrics_bear_B)
-    plot_confusion_matrices(cm_full_A, cm_full_B, cm_bull_A, cm_bull_B, cm_bear_A, cm_bear_B)
-    plot_roc_curves(y_full, proba_full_A, proba_full_B, y_bull, proba_bull_A, proba_bull_B, y_bear, proba_bear_A, proba_bear_B)
+    plot_dynamic_results(
+        dt_plot_data['metrics_full_A'][:4], dt_plot_data['metrics_full_B'][:4],
+        dt_plot_data['metrics_bull_A'][:4], dt_plot_data['metrics_bull_B'][:4],
+        dt_plot_data['metrics_bear_A'][:4], dt_plot_data['metrics_bear_B'][:4]
+    )
+    plot_confusion_matrices(
+        dt_plot_data['cm_full_A'], dt_plot_data['cm_full_B'],
+        dt_plot_data['cm_bull_A'], dt_plot_data['cm_bull_B'],
+        dt_plot_data['cm_bear_A'], dt_plot_data['cm_bear_B']
+    )
+    plot_roc_curves(
+        dt_plot_data['y_full'], dt_plot_data['proba_full_A'], dt_plot_data['proba_full_B'],
+        dt_plot_data['y_bull'], dt_plot_data['proba_bull_A'], dt_plot_data['proba_bull_B'],
+        dt_plot_data['y_bear'], dt_plot_data['proba_bear_A'], dt_plot_data['proba_bear_B']
+    )
     plt.show(block=False)
     plt.pause(1)
 
 
     # ==========================================
-    # PART 4: TOP 5 COMBINATION SEARCH 
+    # PART 4: TOP 5 COMBINATION SEARCH
     # ==========================================
     print("\n" + "=" * 60)
     print("PART 4. TOP 5 COMBINATION SEARCH")
     print("=" * 60)
     
-    # 1. Feature sets
-    feature_sets = {
-        'Base_Features': base_features,
-        'Full_Features(Base+Sentiment)': base_features + sentiment_features
-    }
+    # Filter to only include 'Full Period' segment for Top 5 ranking
+    full_period_results = [res for res in all_results if res[5] == "Full Period"]
     
-    # 2. Scalers
-    scalers = {
-        'StandardScaler': StandardScaler(),
-        'RobustScaler': RobustScaler(),
-        'Raw(No Scale)': None
-    }
-    
-    # 3. Models
-    models = {
-        'DecisionTreeClassifier': (DecisionTreeClassifier(random_state=42), {
-            'classifier__max_depth': [3, 5],
-            'classifier__min_samples_split': [5, 10]
-        }),
-        'RandomForestClassifier': (RandomForestClassifier(random_state=42), {
-            'classifier__n_estimators': [50, 100],
-            'classifier__max_depth': [3, 5]
-        })
-    }
-    
-    top5_results = []
-    
-    for f_name, f_cols in feature_sets.items():
-        X_tr = train_df[f_cols]
-        y_tr = train_df['Target']
-        X_te = test_df[f_cols]
-        y_te = test_df['Target']
-        
-        for s_name, scaler_obj in scalers.items():
-            for m_name, (model_obj, params) in models.items():
-                if scaler_obj is not None:
-                    pipeline = Pipeline([('scaler', scaler_obj), ('classifier', model_obj)])
-                else:
-                    pipeline = Pipeline([('classifier', model_obj)])
-                
-                kfold = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-                grid = GridSearchCV(estimator=pipeline, param_grid=params, cv=kfold, scoring='f1_weighted', n_jobs=-1)
-                grid.fit(X_tr, y_tr)
-                
-                best_mod = grid.best_estimator_
-                y_p = best_mod.predict(X_te)
-                acc = accuracy_score(y_te, y_p)
-                
-                top5_results.append({
-                    'FeatureSet': f_name,
-                    'Scaler': s_name,
-                    'Algorithm': m_name,
-                    'BestParams': grid.best_params_,
-                    'Accuracy': acc
-                })
-                
-    # Sort and print Top 5
-    top5_results.sort(key=lambda x: x['Accuracy'], reverse=True)
+    # Sort Phase 3 results by Accuracy (metrics[0]) descending
+    top5_results = sorted(full_period_results, key=lambda x: x[3][0], reverse=True)
     
     print("\n[ FINAL EVALUATION: TOP 5 BEST COMBINATIONS BY ACCURACY ]")
     for i, res in enumerate(top5_results[:5]):
+        model_name, version, cv_score, metrics, n_samples, segment = res
+        acc, pre, rec, f1, roc = metrics
+        
         print(f"\n[ Rank {i+1} ]")
-        print(f"Algorithm : {res['Algorithm']}")
-        print(f"Features  : {res['FeatureSet']}")
-        print(f"Scaler    : {res['Scaler']}")
-        clean_p = {k.replace('classifier__', ''): v for k, v in res['BestParams'].items()}
-        print(f"Params    : {clean_p}")
-        print(f"Accuracy  : {res['Accuracy']:.4f}")
+        print(f"Segment   : {segment}")
+        print(f"Algorithm : {model_name}")
+        print(f"Features  : {version}")
+        print(f"Accuracy  : {acc:.4f}")
+        print(f"F1(w)     : {f1:.4f}")
         
     print("\nAll integrated analysis pipelines completed.")
     print("Please review the 4 visualization windows that have been opened.")
